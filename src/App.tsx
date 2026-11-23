@@ -2,39 +2,48 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Inspector } from './components/Inspector';
 import { IOPanel } from './components/IOPanel';
 import { Ladder, isLogicTool, type LadderApi, type Tool } from './components/Ladder';
+import { MemoryPanel } from './components/MemoryPanel';
 import { Palette } from './components/Palette';
 import { TopBar } from './components/TopBar';
 import {
   addRung,
+  directOutputCoils,
   findNode,
   insertLogic,
   insertOutput,
+  moveAllToMemory,
+  moveCoilToMemory,
   moveRung,
   nextFreeTag,
   removeLastBranch,
   removeNode,
   removeRung,
   setLabel,
+  setRetentive,
   setRungComment,
   updateNode,
   wrapInParallel,
 } from './engine/edit';
 import { EXAMPLES, emptyProgram } from './engine/examples';
 import { parseProgram, serializeProgram } from './engine/io';
-import { collectPresets, validate } from './engine/plc';
+import { collectPresets, collectTags, validate, type Forces } from './engine/plc';
 import {
+  ANALOG_FULL_SCALE,
+  ANALOG_IN_TAGS,
   INPUT_TAGS,
+  REGISTER_TAGS,
   tagClass,
   uid,
-  type Contact,
   type InputKind,
+  type LogicNode,
   type OutputKind,
   type OutputNode,
   type Program,
   type Warning,
 } from './engine/types';
 import { useHistory } from './hooks/useHistory';
-import { usePlc } from './hooks/usePlc';
+import { usePlc, type RunMode } from './hooks/usePlc';
+import { cx } from './ui';
 
 const STORAGE_KEY = 'clp-sim:program:v1';
 
@@ -51,16 +60,33 @@ function loadInitial(): Program {
   return EXAMPLES[0].build();
 }
 
+/** Nó de lógica novo, com valores iniciais que já fazem sentido. */
+function makeLogicNode(tool: Tool, p: Program): LogicNode {
+  const id = uid();
+  if (tool === 'compare') {
+    const used = collectTags(p);
+    const reg = REGISTER_TAGS.find((t) => used.has(t)) ?? 'D0';
+    return { id, kind: 'compare', op: 'gt', a: { kind: 'tag', tag: reg }, b: { kind: 'const', value: 0 } };
+  }
+  const base = { id, kind: 'contact' as const, tag: 'I0', nc: tool === 'contact-nf' };
+  if (tool === 'edge-p') return { ...base, edge: 'rise' };
+  if (tool === 'edge-n') return { ...base, edge: 'fall' };
+  return base;
+}
+
 function makeOutput(tool: Tool, p: Program): OutputNode {
   const id = uid();
   switch (tool) {
     case 'coil':
     case 'ncoil':
-    case 'set':
       return { id, kind: tool, tag: nextFreeTag(p, 'Q') };
+    case 'mcoil':
+      return { id, kind: 'coil', tag: nextFreeTag(p, 'M') };
+    case 'set':
+      return { id, kind: 'set', tag: nextFreeTag(p, 'M') };
     case 'rst': {
       // Normalmente o RESET fecha o par de um SET já existente.
-      let target = nextFreeTag(p, 'Q');
+      let target = nextFreeTag(p, 'M');
       for (const r of p.rungs) for (const o of r.outputs) if (o.kind === 'set') target = o.tag;
       return { id, kind: 'rst', tag: target };
     }
@@ -69,6 +95,26 @@ function makeOutput(tool: Tool, p: Program): OutputNode {
       return { id, kind: tool, tag: nextFreeTag(p, 'T'), preset: 3000 };
     case 'ctu':
       return { id, kind: 'ctu', tag: nextFreeTag(p, 'C'), preset: 10 };
+    case 'mov':
+      return { id, kind: 'mov', src: { kind: 'const', value: 0 }, dst: nextFreeTag(p, 'D') };
+    case 'add':
+    case 'sub':
+    case 'mul':
+    case 'div': {
+      const dst = nextFreeTag(p, 'D');
+      return { id, kind: tool, a: { kind: 'tag', tag: dst }, b: { kind: 'const', value: 1 }, dst };
+    }
+    case 'scl':
+      return {
+        id,
+        kind: 'scl',
+        src: { kind: 'tag', tag: 'AI0' },
+        dst: nextFreeTag(p, 'D'),
+        inMin: 0,
+        inMax: ANALOG_FULL_SCALE,
+        outMin: 0,
+        outMax: 100,
+      };
     default: {
       const defined = Object.keys(collectPresets(p));
       const target = defined.find((t) => tagClass(t) === 'C') ?? defined[0] ?? 'C0';
@@ -116,7 +162,10 @@ export default function App() {
   const { program, canUndo, canRedo, commit, undo, redo } = useHistory(initial);
 
   const [actuated, setActuated] = useState<Record<string, boolean>>({});
-  const [running, setRunning] = useState(true);
+  const [mode, setMode] = useState<RunMode>('run');
+  const [analogPct, setAnalogPct] = useState<Record<string, number>>({});
+  const [forces, setForces] = useState<Forces>({});
+  const [sideTab, setSideTab] = useState<'props' | 'memory'>('props');
   const [scanMs, setScanMs] = useState(10);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tool, setTool] = useState<Tool | null>(null);
@@ -134,8 +183,16 @@ export default function App() {
     return m;
   }, [program.inputKinds, actuated]);
 
-  const { snap, reset } = usePlc(program, physical, running, scanMs);
+  const analogRaw = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const tag of ANALOG_IN_TAGS) m[tag] = Math.round(((analogPct[tag] ?? 0) / 100) * ANALOG_FULL_SCALE);
+    return m;
+  }, [analogPct]);
+
+  const { snap, step, coldStart } = usePlc(program, physical, analogRaw, forces, mode, scanMs);
   const warnings = useMemo(() => validate(program), [program]);
+  const directCount = useMemo(() => directOutputCoils(program).length, [program]);
+  const forcedCount = Object.keys(forces).length;
   const warnRungs = useMemo(() => new Set(warnings.map((w) => w.rungId)), [warnings]);
   const found = useMemo(() => (selectedId ? findNode(program, selectedId) : null), [program, selectedId]);
 
@@ -158,13 +215,28 @@ export default function App() {
     (p: Program, message: string) => {
       commit(() => p);
       setActuated({});
+      setAnalogPct({});
+      setForces({});
       setSelectedId(null);
       setTool(null);
-      reset();
+      coldStart();
       setNotice(message);
     },
-    [commit, reset],
+    [commit, coldStart],
   );
+
+  const selectNode = useCallback((id: string | null) => {
+    setSelectedId(id);
+    if (id) setSideTab('props');
+  }, []);
+
+  const onForce = (tag: string, value: boolean | number | null) =>
+    setForces((f) => {
+      const next = { ...f };
+      if (value === null) delete next[tag];
+      else next[tag] = value;
+      return next;
+    });
 
   // ---- Atalhos de teclado ----
   useEffect(() => {
@@ -224,10 +296,10 @@ export default function App() {
     selectedId,
     tool,
     warnRungs,
-    onSelect: setSelectedId,
+    onSelect: selectNode,
     onInsertLogic: (rungId, key, index) => {
-      if (!isLogicTool(tool)) return;
-      const node: Contact = { id: uid(), kind: 'contact', tag: 'I0', nc: tool === 'contact-nf' };
+      if (!tool || !isLogicTool(tool)) return;
+      const node = makeLogicNode(tool, program);
       commit((p) => insertLogic(p, rungId, key, index, node));
       setSelectedId(node.id);
     },
@@ -249,9 +321,16 @@ export default function App() {
   return (
     <div className="app">
       <TopBar
-        running={running}
-        onRun={() => setRunning(true)}
-        onStop={() => setRunning(false)}
+        mode={mode}
+        onRun={() => setMode('run')}
+        onPause={() => setMode('pause')}
+        onStep={() => {
+          setMode('pause');
+          step();
+        }}
+        onStop={() => setMode('stop')}
+        forcedCount={forcedCount}
+        onClearForces={() => setForces({})}
         scanMs={scanMs}
         onScanMs={setScanMs}
         examples={EXAMPLES}
@@ -276,6 +355,10 @@ export default function App() {
             actuated={actuated}
             physical={physical}
             outputs={snap.bits}
+            regs={snap.regs}
+            forces={forces}
+            analogPct={analogPct}
+            onAnalog={(tag, pct) => setAnalogPct((a) => ({ ...a, [tag]: pct }))}
             onActuate={(tag, value) => setActuated((a) => ({ ...a, [tag]: value }))}
             onInputKind={(tag, kind: InputKind) => {
               commit((p) => ({ ...p, inputKinds: { ...p.inputKinds, [tag]: kind } }));
@@ -312,21 +395,74 @@ export default function App() {
           </div>
         </main>
 
-        <aside className="side" aria-label="Propriedades e monitor">
-          <Inspector
-            program={program}
-            snap={snap}
-            found={found}
-            warnings={warnings}
-            onUpdate={(id, patch) => commit((p) => updateNode(p, id, patch), `upd:${id}`)}
-            onRemove={(id) => {
-              commit((p) => removeNode(p, id));
-              setSelectedId(null);
-            }}
-            onWrap={(id) => commit((p) => wrapInParallel(p, id))}
-            onRemoveBranch={(id) => commit((p) => removeLastBranch(p, id))}
-            onLabel={(tag, text) => commit((p) => setLabel(p, tag, text), `label:${tag}`)}
-          />
+        <aside className="side" aria-label="Propriedades e memória">
+          <div className="tabs" role="tablist">
+            <button
+              role="tab"
+              aria-selected={sideTab === 'props'}
+              className={cx(sideTab === 'props' && 'on')}
+              onClick={() => setSideTab('props')}
+            >
+              Propriedades
+              {warnings.length > 0 && (
+                <b className="badge" title={`${warnings.length} aviso(s)`}>
+                  {warnings.length}
+                </b>
+              )}
+            </button>
+            <button
+              role="tab"
+              aria-selected={sideTab === 'memory'}
+              className={cx(sideTab === 'memory' && 'on')}
+              onClick={() => setSideTab('memory')}
+            >
+              Memória
+              {forcedCount > 0 && (
+                <b className="badge force" title={`${forcedCount} endereço(s) forçado(s)`}>
+                  F{forcedCount}
+                </b>
+              )}
+            </button>
+          </div>
+          {sideTab === 'props' ? (
+            <Inspector
+              program={program}
+              found={found}
+              warnings={warnings}
+              onUpdate={(id, patch) => commit((p) => updateNode(p, id, patch), `upd:${id}`)}
+              onRemove={(id) => {
+                commit((p) => removeNode(p, id));
+                setSelectedId(null);
+              }}
+              onWrap={(id) => commit((p) => wrapInParallel(p, id))}
+              onRemoveBranch={(id) => commit((p) => removeLastBranch(p, id))}
+              onLabel={(tag, text) => commit((p) => setLabel(p, tag, text), `label:${tag}`)}
+              onRetentive={(tag, on) => commit((p) => setRetentive(p, tag, on))}
+              onMoveToMemory={(id) => {
+                commit((p) => moveCoilToMemory(p, id));
+                setNotice('Lógica movida para uma memória; a saída Q agora só copia no final. Ctrl+Z desfaz.');
+              }}
+            />
+          ) : (
+            <MemoryPanel
+              program={program}
+              snap={snap}
+              forces={forces}
+              mode={mode}
+              directCount={directCount}
+              onForce={onForce}
+              onRetentive={(tag, on) => commit((p) => setRetentive(p, tag, on))}
+              onMoveAll={() => {
+                commit((p) => moveAllToMemory(p));
+                setNotice(`${directCount} bobina(s) movida(s) para memórias. Ctrl+Z desfaz.`);
+              }}
+              onColdStart={() => {
+                coldStart();
+                setNotice('Memória zerada (partida a frio), inclusive as retentivas.');
+              }}
+              onClearForces={() => setForces({})}
+            />
+          )}
         </aside>
       </div>
 

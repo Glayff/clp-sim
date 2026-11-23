@@ -1,7 +1,8 @@
 // Painel de campo: dispositivos virtuais ligados às entradas e saídas do CLP.
 
+import type { Forces } from '../engine/plc';
 import type { InputKind, OutputKind, Program } from '../engine/types';
-import { INPUT_TAGS, OUTPUT_TAGS } from '../engine/types';
+import { ANALOG_FULL_SCALE, ANALOG_IN_TAGS, ANALOG_OUT_TAGS, INPUT_TAGS, OUTPUT_TAGS } from '../engine/types';
 import { cx } from '../ui';
 
 const LAMP_COLORS = [
@@ -132,6 +133,19 @@ function PushButton({
   );
 }
 
+const pct1 = (n: number): string => n.toFixed(1).replace('.', ',');
+/** 0–27648 ↔ 4–20 mA, como nos módulos analógicos de campo. */
+const rawToPct = (raw: number): number => (raw / ANALOG_FULL_SCALE) * 100;
+const pctToMa = (pct: number): string => pct1(4 + pct * 0.16);
+
+function ForceBadge() {
+  return (
+    <i className="fbadge" title="Valor forçado: o programa não controla este endereço" aria-label="forçado">
+      F
+    </i>
+  );
+}
+
 export interface IOPanelProps {
   program: Program;
   /** Dispositivo acionado (chave ligada / botão pressionado) */
@@ -139,6 +153,12 @@ export interface IOPanelProps {
   /** Nível elétrico real de cada entrada */
   physical: Record<string, boolean>;
   outputs: Record<string, boolean>;
+  /** Valores dos registradores (para as saídas analógicas) */
+  regs: Record<string, number>;
+  forces: Forces;
+  /** Posição de cada entrada analógica, de 0 a 100 % */
+  analogPct: Record<string, number>;
+  onAnalog: (tag: string, pct: number) => void;
   onActuate: (tag: string, value: boolean) => void;
   onInputKind: (tag: string, kind: InputKind) => void;
   onOutputKind: (tag: string, kind: OutputKind) => void;
@@ -160,6 +180,8 @@ export function IOPanel(p: IOPanelProps) {
         const on = !!p.actuated[tag];
         const name = p.program.labels[tag] ?? '';
         const label = name ? `${tag}, ${name}` : tag;
+        const forced = tag in p.forces;
+        const level = forced ? !!p.forces[tag] : p.physical[tag];
         return (
           <div className="io-row" key={tag}>
             <span className="addr">{tag}</span>
@@ -189,10 +211,8 @@ export function IOPanel(p: IOPanelProps) {
                   </option>
                 ))}
               </select>
-              <span
-                className={cx('led', p.physical[tag] && 'on')}
-                title={p.physical[tag] ? 'Entrada em nível 1' : 'Entrada em nível 0'}
-              />
+              {forced && <ForceBadge />}
+              <span className={cx('led', level && 'on')} title={level ? 'Entrada em nível 1' : 'Entrada em nível 0'} />
             </div>
           </div>
         );
@@ -225,7 +245,88 @@ export function IOPanel(p: IOPanelProps) {
                 <option value="lamp">Sinaleiro</option>
                 <option value="motor">Motor</option>
               </select>
+              {tag in p.forces && <ForceBadge />}
               <span className={cx('led', on && 'on')} title={on ? 'Saída ligada' : 'Saída desligada'} />
+            </div>
+          </div>
+        );
+      })}
+
+      <h2>Entradas analógicas</h2>
+      {ANALOG_IN_TAGS.map((tag) => {
+        const forced = tag in p.forces;
+        const pct = forced ? rawToPct(Number(p.forces[tag])) : (p.analogPct[tag] ?? 0);
+        const raw = forced ? Number(p.forces[tag]) : Math.round((pct / 100) * ANALOG_FULL_SCALE);
+        const name = p.program.labels[tag] ?? '';
+        return (
+          <div className="io-an" key={tag}>
+            <span className="addr">{tag}</span>
+            <input
+              className="plate"
+              value={name}
+              placeholder="Sem nome"
+              maxLength={40}
+              aria-label={`Nome da entrada analógica ${tag}`}
+              onChange={(e) => p.onLabel(tag, e.target.value)}
+            />
+            <div className="an-slide">
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={0.5}
+                value={pct}
+                disabled={forced}
+                style={{ '--p': `${pct}%` } as React.CSSProperties}
+                aria-label={`${tag}${name ? `, ${name}` : ''}: sinal de 0 a 100 por cento`}
+                onChange={(e) => p.onAnalog(tag, Number(e.target.value))}
+              />
+              <output>{pct1(pct)} %</output>
+            </div>
+            <div className="an-sub">
+              <span>
+                {pctToMa(pct)} mA · {raw.toLocaleString('pt-BR')}
+              </span>
+              {forced && <ForceBadge />}
+            </div>
+          </div>
+        );
+      })}
+
+      <h2>Saídas analógicas</h2>
+      {ANALOG_OUT_TAGS.map((tag) => {
+        const raw = p.regs[tag] ?? 0;
+        const pct = rawToPct(raw);
+        const name = p.program.labels[tag] ?? '';
+        return (
+          <div className="io-an" key={tag}>
+            <span className="addr">{tag}</span>
+            <input
+              className="plate"
+              value={name}
+              placeholder="Sem nome"
+              maxLength={40}
+              aria-label={`Nome da saída analógica ${tag}`}
+              onChange={(e) => p.onLabel(tag, e.target.value)}
+            />
+            <div className="an-slide">
+              <div
+                className="an-gauge"
+                role="meter"
+                aria-label={`${tag}${name ? `, ${name}` : ''}`}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(pct)}
+              >
+                <i style={{ width: `${pct}%` }} />
+              </div>
+              <output>{pct1(pct)} %</output>
+            </div>
+            <div className="an-sub">
+              <span>
+                {pctToMa(pct)} mA · {raw.toLocaleString('pt-BR')}
+              </span>
+              {tag in p.forces && <ForceBadge />}
             </div>
           </div>
         );

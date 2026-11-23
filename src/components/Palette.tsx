@@ -11,10 +11,15 @@ function Glyph({ children }: { children: ReactNode }) {
   );
 }
 
-const contact = (nc: boolean) => (
+const contact = (nc: boolean, edge?: string) => (
   <Glyph>
     <path d="M0 12h13M27 12h13M13 4v16M27 4v16" />
     {nc && <path d="M11 19L29 5" />}
+    {edge && (
+      <text x={20} y={15.5} textAnchor="middle" fontSize={10} fontWeight={700} fill="currentColor" stroke="none" fontFamily="IBM Plex Mono, monospace">
+        {edge}
+      </text>
+    )}
   </Glyph>
 );
 const coil = (glyph: string) => (
@@ -38,23 +43,49 @@ const block = (text: string) => (
   </Glyph>
 );
 
-const GROUPS: Array<Array<{ tool: Tool; label: string; hint: string; glyph: ReactNode }>> = [
-  [
-    { tool: 'contact-na', label: 'Contato NA', hint: 'Passa energia quando o endereço vale 1', glyph: contact(false) },
-    { tool: 'contact-nf', label: 'Contato NF', hint: 'Passa energia quando o endereço vale 0', glyph: contact(true) },
-  ],
-  [
-    { tool: 'coil', label: 'Bobina', hint: 'Liga o endereço enquanto houver energia', glyph: coil('') },
-    { tool: 'ncoil', label: 'Negada', hint: 'Liga o endereço quando NÃO há energia', glyph: coil('/') },
-    { tool: 'set', label: 'SET', hint: 'Liga e mantém ligado (trava)', glyph: coil('S') },
-    { tool: 'rst', label: 'RESET', hint: 'Desliga um endereço travado por SET', glyph: coil('R') },
-  ],
-  [
-    { tool: 'ton', label: 'TON', hint: 'Temporizador com retardo na energização', glyph: block('TON') },
-    { tool: 'tof', label: 'TOF', hint: 'Temporizador com retardo na desenergização', glyph: block('TOF') },
-    { tool: 'ctu', label: 'CTU', hint: 'Contador crescente (conta bordas de subida)', glyph: block('CTU') },
-    { tool: 'res', label: 'RES', hint: 'Zera um contador ou temporizador', glyph: block('RES') },
-  ],
+type Item = { tool: Tool; label: string; hint: string; glyph: ReactNode };
+
+const GROUPS: Array<{ title: string; items: Item[] }> = [
+  {
+    title: 'Contatos',
+    items: [
+      { tool: 'contact-na', label: 'Contato NA', hint: 'Passa energia quando o endereço vale 1', glyph: contact(false) },
+      { tool: 'contact-nf', label: 'Contato NF', hint: 'Passa energia quando o endereço vale 0', glyph: contact(true) },
+      { tool: 'edge-p', label: 'Borda ↑', hint: 'Passa energia por UM ciclo, quando o endereço sobe de 0 para 1', glyph: contact(false, 'P') },
+      { tool: 'edge-n', label: 'Borda ↓', hint: 'Passa energia por UM ciclo, quando o endereço desce de 1 para 0', glyph: contact(false, 'N') },
+      { tool: 'compare', label: 'Comparar', hint: 'Passa energia quando a comparação entre dois valores é verdadeira (=, ≠, >, ≥, <, ≤)', glyph: block('≥') },
+    ],
+  },
+  {
+    title: 'Bobinas',
+    items: [
+      { tool: 'mcoil', label: 'Memória M', hint: 'Bobina em uma memória auxiliar (M): é onde a lógica deve ficar', glyph: coil('M') },
+      { tool: 'coil', label: 'Saída Q', hint: 'Bobina em uma saída física (Q): use só no final do programa', glyph: coil('') },
+      { tool: 'ncoil', label: 'Negada', hint: 'Liga o endereço quando NÃO há energia', glyph: coil('/') },
+      { tool: 'set', label: 'SET', hint: 'Liga e mantém ligado (trava)', glyph: coil('S') },
+      { tool: 'rst', label: 'RESET', hint: 'Desliga um endereço travado por SET', glyph: coil('R') },
+    ],
+  },
+  {
+    title: 'Blocos',
+    items: [
+      { tool: 'ton', label: 'TON', hint: 'Temporizador com retardo na energização', glyph: block('TON') },
+      { tool: 'tof', label: 'TOF', hint: 'Temporizador com retardo na desenergização', glyph: block('TOF') },
+      { tool: 'ctu', label: 'CTU', hint: 'Contador crescente (conta bordas de subida)', glyph: block('CTU') },
+      { tool: 'res', label: 'RES', hint: 'Zera um contador ou temporizador', glyph: block('RES') },
+    ],
+  },
+  {
+    title: 'Dados',
+    items: [
+      { tool: 'mov', label: 'MOV', hint: 'Copia um valor (constante ou registrador) para um registrador', glyph: block('MOV') },
+      { tool: 'add', label: 'ADD', hint: 'Soma A + B e guarda no destino', glyph: block('ADD') },
+      { tool: 'sub', label: 'SUB', hint: 'Subtrai A − B e guarda no destino', glyph: block('SUB') },
+      { tool: 'mul', label: 'MUL', hint: 'Multiplica A × B e guarda no destino', glyph: block('MUL') },
+      { tool: 'div', label: 'DIV', hint: 'Divide A ÷ B (inteiro) e guarda no destino', glyph: block('DIV') },
+      { tool: 'scl', label: 'SCL', hint: 'Escalona um valor: ex. entrada analógica 0–27648 → 0–100 %', glyph: block('SCL') },
+    ],
+  },
 ];
 
 export function Palette({
@@ -70,9 +101,9 @@ export function Palette({
 }) {
   return (
     <div className="palette" role="toolbar" aria-label="Instruções Ladder">
-      {GROUPS.map((group, gi) => (
-        <div className="palette-group" key={gi}>
-          {group.map((it) => (
+      {GROUPS.map((group) => (
+        <div className="palette-group" key={group.title} role="group" aria-label={group.title}>
+          {group.items.map((it) => (
             <button
               key={it.tool}
               className={cx('tool', tool === it.tool && 'active')}

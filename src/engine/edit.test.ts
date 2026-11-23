@@ -1,18 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import {
   addRung,
+  directOutputCoils,
   insertLogic,
   insertOutput,
+  moveAllToMemory,
+  moveCoilToMemory,
   moveRung,
   nextFreeTag,
   removeLastBranch,
   removeNode,
   setLabel,
+  setRetentive,
   updateNode,
   wrapInParallel,
 } from './edit';
+import { createState, scan } from './plc';
 import { COIL, NA, NF, RUNG, TON, emptyProgram } from './examples';
-import type { Contact, Parallel, Program } from './types';
+import type { Contact, Parallel, Program, Trace } from './types';
 
 function base(): Program {
   return { ...emptyProgram(), rungs: [RUNG('', [], [])] };
@@ -165,5 +170,109 @@ describe('degraus e rótulos', () => {
     expect(nextFreeTag(p, 'T')).toBe('T1');
     expect(nextFreeTag(p, 'Q')).toBe('Q1');
     expect(nextFreeTag(p, 'C')).toBe('C0');
+  });
+});
+
+describe('mover lógica para memória', () => {
+  const direto = (): Program => ({
+    ...emptyProgram(),
+    rungs: [
+      RUNG('partida', [NA('I0'), NF('I1')], [COIL('Q0')]),
+      RUNG('usa a saída como condição', [NA('Q0')], [COIL('Q1')]),
+    ],
+    labels: { Q0: 'Motor' },
+  });
+
+  it('a bobina vai para M, um degrau copia M → Q e quem lia Q passa a ler M', () => {
+    const p = direto();
+    const id = p.rungs[0].outputs[0].id;
+    const r = moveCoilToMemory(p, id);
+    expect(r.rungs).toHaveLength(3);
+    expect(r.rungs[0].outputs[0]).toMatchObject({ kind: 'coil', tag: 'M0' });
+    // degrau-espelho logo abaixo do original
+    expect(r.rungs[1].logic).toMatchObject([{ kind: 'contact', tag: 'M0', nc: false }]);
+    expect(r.rungs[1].outputs).toMatchObject([{ kind: 'coil', tag: 'Q0' }]);
+    // o contato que lia Q0 agora lê M0
+    expect(r.rungs[2].logic).toMatchObject([{ kind: 'contact', tag: 'M0' }]);
+    expect(r.labels.M0).toBe('Motor (comando)');
+  });
+
+  it('o comportamento não muda depois de mover', () => {
+    const p = direto();
+    const r = moveCoilToMemory(p, p.rungs[0].outputs[0].id);
+    for (const prog of [p, r]) {
+      const state = createState();
+      const trace: Trace = new Map();
+      scan(prog, state, { I0: true, I1: false }, 10, trace);
+      scan(prog, state, { I0: true, I1: false }, 10, trace);
+      expect(state.bits.Q0).toBe(true);
+      expect(state.bits.Q1).toBe(true);
+    }
+  });
+
+  it('usa o primeiro M livre e não reaproveita um M já usado', () => {
+    const p = direto();
+    p.rungs.push(RUNG('', [NA('I2')], [COIL('M0')]));
+    const r = moveCoilToMemory(p, p.rungs[0].outputs[0].id);
+    expect(r.rungs[0].outputs[0]).toMatchObject({ tag: 'M1' });
+  });
+
+  it('ignora bobinas que não são de saída física', () => {
+    const p: Program = { ...emptyProgram(), rungs: [RUNG('', [NA('I0')], [COIL('M3')])] };
+    expect(moveCoilToMemory(p, p.rungs[0].outputs[0].id)).toBe(p);
+    expect(moveCoilToMemory(p, 'inexistente')).toBe(p);
+  });
+
+  it('directOutputCoils só aponta Q com lógica própria; cópias de M, T e C ficam de fora', () => {
+    const p: Program = {
+      ...emptyProgram(),
+      rungs: [
+        RUNG('direta', [NA('I0')], [COIL('Q0')]),
+        RUNG('cópia de M', [NA('M0')], [COIL('Q1')]),
+        RUNG('cópia de T', [NA('T0')], [COIL('Q2')]),
+        RUNG('cópia de C', [NA('C0')], [COIL('Q3')]),
+        RUNG('NF não é cópia', [NF('M0')], [COIL('Q4')]),
+        RUNG('memória comum', [NA('I0')], [COIL('M1')]),
+      ],
+    };
+    const ids = directOutputCoils(p);
+    expect(ids).toHaveLength(2);
+    expect(ids).toContain(p.rungs[0].outputs[0].id);
+    expect(ids).toContain(p.rungs[4].outputs[0].id);
+  });
+
+  it('moveAllToMemory deixa o programa sem saídas diretas', () => {
+    const p: Program = {
+      ...emptyProgram(),
+      rungs: [RUNG('a', [NA('I0')], [COIL('Q0')]), RUNG('b', [NA('I1'), NA('I2')], [COIL('Q1')])],
+    };
+    const r = moveAllToMemory(p);
+    expect(directOutputCoils(r)).toEqual([]);
+    expect(r.rungs).toHaveLength(4);
+    const usados = r.rungs.flatMap((x) => x.outputs.map((o) => ('tag' in o ? o.tag : '')));
+    expect(usados.filter((t) => t.startsWith('M'))).toEqual(['M0', 'M1']);
+  });
+});
+
+describe('retentividade no programa', () => {
+  it('liga e desliga só para M, D e C, sem duplicar', () => {
+    let p = emptyProgram();
+    p = setRetentive(p, 'M5', true);
+    p = setRetentive(p, 'M5', true);
+    p = setRetentive(p, 'D2', true);
+    p = setRetentive(p, 'C1', true);
+    expect(p.retentive).toEqual(['M5', 'D2', 'C1']);
+    p = setRetentive(p, 'M5', false);
+    expect(p.retentive).toEqual(['D2', 'C1']);
+    const igual = setRetentive(p, 'Q0', true);
+    expect(igual).toBe(p);
+    expect(setRetentive(p, 'T0', true)).toBe(p);
+    expect(setRetentive(p, 'I0', true)).toBe(p);
+  });
+
+  it('nextFreeTag para registradores', () => {
+    const p: Program = { ...emptyProgram(), rungs: [RUNG('', [NA('S0')], [{ id: 'x', kind: 'mov', src: { kind: 'const', value: 1 }, dst: 'D0' }])] };
+    expect(nextFreeTag(p, 'D')).toBe('D1');
+    expect(nextFreeTag(emptyProgram(), 'M')).toBe('M0');
   });
 });

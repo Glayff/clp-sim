@@ -5,7 +5,9 @@ import {
   COUNTER_TAGS,
   MEMORY_TAGS,
   OUTPUT_TAGS,
+  REGISTER_TAGS,
   TIMER_TAGS,
+  tagClass,
   uid,
   type LogicNode,
   type OutputNode,
@@ -220,9 +222,102 @@ export function findNode(program: Program, id: string): Found | null {
 }
 
 /** Primeiro endereço livre da lista (ainda não usado no programa), ou o primeiro se todos estiverem em uso. */
-export function nextFreeTag(program: Program, kind: 'Q' | 'M' | 'T' | 'C'): string {
+export function nextFreeTag(program: Program, kind: 'Q' | 'M' | 'T' | 'C' | 'D'): string {
   const used = collectTags(program);
   const pool: readonly string[] =
-    kind === 'Q' ? [...OUTPUT_TAGS] : kind === 'M' ? MEMORY_TAGS : kind === 'T' ? TIMER_TAGS : COUNTER_TAGS;
+    kind === 'Q'
+      ? [...OUTPUT_TAGS]
+      : kind === 'M'
+        ? MEMORY_TAGS
+        : kind === 'T'
+          ? TIMER_TAGS
+          : kind === 'D'
+            ? REGISTER_TAGS
+            : COUNTER_TAGS;
   return pool.find((t) => !used.has(t)) ?? pool[0];
+}
+
+function retagLogic(series: LogicNode[], from: string, to: string): LogicNode[] {
+  return series.map((n) => {
+    if (n.kind === 'contact') return n.tag === from ? { ...n, tag: to } : n;
+    if (n.kind === 'parallel') return { ...n, branches: n.branches.map((b) => retagLogic(b, from, to)) };
+    return n;
+  });
+}
+
+/**
+ * Passa a lógica de uma bobina de saída (Q) para uma memória (M) livre:
+ * a bobina e todos os contatos que liam o Q passam a usar o M, e um degrau
+ * novo logo abaixo copia o M para a saída física. Assim o Q fica só no final.
+ */
+export function moveCoilToMemory(program: Program, coilId: string): Program {
+  const found = findNode(program, coilId);
+  if (!found || found.type !== 'output') return program;
+  const coil = found.node;
+  if (coil.kind !== 'coil' || tagClass(coil.tag) !== 'Q') return program;
+
+  const q = coil.tag;
+  const m = nextFreeTag(program, 'M');
+  const mirror: Rung = {
+    id: uid(),
+    comment: 'Saída física',
+    logic: [{ id: uid(), kind: 'contact', tag: m, nc: false }],
+    outputs: [{ id: uid(), kind: 'coil', tag: q }],
+  };
+
+  const rungs: Rung[] = [];
+  for (const r of program.rungs) {
+    const next: Rung = {
+      ...r,
+      logic: retagLogic(r.logic, q, m),
+      outputs: r.outputs.map((o) => (o.id === coilId ? { ...o, tag: m } : o)),
+    };
+    rungs.push(next);
+    if (r.id === found.rungId) rungs.push(mirror);
+  }
+
+  const labels = { ...program.labels };
+  if (labels[q] && !labels[m]) labels[m] = `${labels[q]} (comando)`;
+  return { ...program, rungs, labels };
+}
+
+/** Liga ou desliga a retentividade de um endereço (M, D ou C). */
+export function setRetentive(program: Program, tag: string, on: boolean): Program {
+  const cls = tagClass(tag);
+  if (cls !== 'M' && cls !== 'D' && cls !== 'C') return program;
+  const has = program.retentive.includes(tag);
+  if (on === has) return program;
+  return {
+    ...program,
+    retentive: on ? [...program.retentive, tag] : program.retentive.filter((t) => t !== tag),
+  };
+}
+
+/**
+ * Degrau que só copia um bit interno (memória, temporizador ou contador) para a
+ * saída física: `[M] → (Q)`, `[T0.DN] → (Q)`. É o "Q só no final" que queremos.
+ */
+function isMirrorRung(r: Rung): boolean {
+  if (r.logic.length !== 1) return false;
+  const c = r.logic[0];
+  if (c.kind !== 'contact' || c.nc || c.edge) return false;
+  const cls = tagClass(c.tag);
+  return cls === 'M' || cls === 'T' || cls === 'C';
+}
+
+/** Ids das bobinas que escrevem direto em uma saída Q com lógica própria (candidatas a ir para memória). */
+export function directOutputCoils(program: Program): string[] {
+  const ids: string[] = [];
+  for (const r of program.rungs) {
+    if (isMirrorRung(r)) continue;
+    for (const o of r.outputs) if (o.kind === 'coil' && tagClass(o.tag) === 'Q') ids.push(o.id);
+  }
+  return ids;
+}
+
+/** Leva todas as bobinas diretas de saída para memórias, deixando os Q só no final. */
+export function moveAllToMemory(program: Program): Program {
+  let next = program;
+  for (const id of directOutputCoils(program)) next = moveCoilToMemory(next, id);
+  return next;
 }

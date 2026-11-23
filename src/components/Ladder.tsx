@@ -2,20 +2,55 @@
 // colorindo cada fio conforme o fluxo de energia da última varredura.
 
 import { createContext, useContext, type ReactNode } from 'react';
-import { readTag } from '../engine/plc';
-import type { Contact, LogicNode, OutputNode, Parallel, Program, Rung } from '../engine/types';
+import { readNum, readTag } from '../engine/plc';
+import {
+  COMPARE_SYMBOL,
+  tagClass,
+  type Coil,
+  type Compare,
+  type Contact,
+  type LogicNode,
+  type Operand,
+  type OutputNode,
+  type Parallel,
+  type Program,
+  type Rung,
+} from '../engine/types';
 import type { Snapshot } from '../hooks/usePlc';
 import { cx, fmtSec, trunc } from '../ui';
 import { Icon } from './Icons';
 
-export type Tool = 'contact-na' | 'contact-nf' | 'coil' | 'ncoil' | 'set' | 'rst' | 'ton' | 'tof' | 'ctu' | 'res';
-export const isLogicTool = (t: Tool | null): boolean => t === 'contact-na' || t === 'contact-nf';
+export type Tool =
+  | 'contact-na'
+  | 'contact-nf'
+  | 'edge-p'
+  | 'edge-n'
+  | 'compare'
+  | 'coil'
+  | 'mcoil'
+  | 'ncoil'
+  | 'set'
+  | 'rst'
+  | 'ton'
+  | 'tof'
+  | 'ctu'
+  | 'res'
+  | 'mov'
+  | 'add'
+  | 'sub'
+  | 'mul'
+  | 'div'
+  | 'scl';
+
+const LOGIC_TOOLS: readonly Tool[] = ['contact-na', 'contact-nf', 'edge-p', 'edge-n', 'compare'];
+export const isLogicTool = (t: Tool | null): boolean => t !== null && LOGIC_TOOLS.includes(t);
 export const isOutputTool = (t: Tool | null): boolean => t !== null && !isLogicTool(t);
 
 export const CELL_H = 88;
 export const WIRE_Y = 44;
 const CELL_W = 92;
 const BLOCK_W = 132;
+const SCL_W = 176;
 const SLOT_W = 30;
 
 export interface LadderApi {
@@ -110,13 +145,18 @@ function Slot({ on, active, onClick, label }: { on: boolean; active: boolean; on
 
 // ---------- Elementos ----------
 
+const opText = (o: Operand): string => (o.kind === 'const' ? String(o.value) : o.tag);
+
 function ContactCell({ node }: { node: Contact }) {
   const api = useApi();
   const t = api.snap.trace.get(node.id);
   const value = readTag(api.snap, node.tag);
-  const closed = node.nc ? !value : value;
   const label = api.program.labels[node.tag];
-  const symClass = cx('sym', t?.pout ? 'on' : closed ? 'closed' : 'open');
+  // Contato de borda só "fecha" por um ciclo; a interface o mantém aceso um instante para dar para ver.
+  const lit = node.edge ? !!t?.pout || !!api.snap.flash[node.id] : false;
+  const closed = node.edge ? lit : node.nc ? !value : value;
+  const symClass = cx('sym', (node.edge ? lit : t?.pout) ? 'on' : closed ? 'closed' : 'open');
+  const kind = node.edge === 'rise' ? 'Contato de borda de subida' : node.edge === 'fall' ? 'Contato de borda de descida' : node.nc ? 'Contato NF' : 'Contato NA';
   return (
     <button
       className={cx('cell', api.selectedId === node.id && 'selected')}
@@ -125,7 +165,7 @@ function ContactCell({ node }: { node: Contact }) {
         e.stopPropagation();
         api.onSelect(node.id);
       }}
-      aria-label={`${node.nc ? 'Contato NF' : 'Contato NA'} ${node.tag}${label ? `, ${label}` : ''}`}
+      aria-label={`${kind} ${node.tag}${label ? `, ${label}` : ''}`}
       title={label ? `${node.tag} — ${label}` : node.tag}
     >
       <svg width={CELL_W} height={CELL_H} viewBox={`0 0 ${CELL_W} ${CELL_H}`}>
@@ -133,7 +173,12 @@ function ContactCell({ node }: { node: Contact }) {
         <line x1={58} x2={CELL_W} y1={WIRE_Y} y2={WIRE_Y} className={cx('ln', t?.pout && 'on')} />
         <line x1={34} x2={34} y1={28} y2={60} className={symClass} />
         <line x1={58} x2={58} y1={28} y2={60} className={symClass} />
-        {node.nc && <line x1={30} y1={58} x2={62} y2={30} className={symClass} />}
+        {node.nc && !node.edge && <line x1={30} y1={58} x2={62} y2={30} className={symClass} />}
+        {node.edge && (
+          <text x={46} y={WIRE_Y + 5} className={cx('edge-glyph', lit && 'on')} textAnchor="middle">
+            {node.edge === 'rise' ? 'P' : 'N'}
+          </text>
+        )}
         <text x={CELL_W / 2} y={18} className="tag" textAnchor="middle">
           {node.tag}
         </text>
@@ -145,15 +190,137 @@ function ContactCell({ node }: { node: Contact }) {
   );
 }
 
+/** Operando em uma linha do bloco: nome à esquerda e valor ao vivo à direita. */
+function OperandLine({ o, x0, x1, y, snap }: { o: Operand; x0: number; x1: number; y: number; snap: Snapshot }) {
+  return (
+    <>
+      <text x={x0} y={y} className="blk-line">
+        {opText(o)}
+      </text>
+      {o.kind === 'tag' && (
+        <text x={x1} y={y} className="blk-val" textAnchor="end">
+          {readNum(snap, o.tag)}
+        </text>
+      )}
+    </>
+  );
+}
+
+function CompareCell({ node }: { node: Compare }) {
+  const api = useApi();
+  const t = api.snap.trace.get(node.id);
+  const label = `${opText(node.a)} ${COMPARE_SYMBOL[node.op]} ${opText(node.b)}`;
+  return (
+    <button
+      className={cx('cell', api.selectedId === node.id && 'selected')}
+      style={{ width: BLOCK_W }}
+      onClick={(e) => {
+        e.stopPropagation();
+        api.onSelect(node.id);
+      }}
+      aria-label={`Comparação ${label}`}
+      title={`Comparação: ${label}`}
+    >
+      <svg width={BLOCK_W} height={CELL_H} viewBox={`0 0 ${BLOCK_W} ${CELL_H}`}>
+        <line x1={0} x2={14} y1={WIRE_Y} y2={WIRE_Y} className={cx('ln', t?.pin && 'on')} />
+        <line x1={118} x2={BLOCK_W} y1={WIRE_Y} y2={WIRE_Y} className={cx('ln', t?.pout && 'on')} />
+        <rect x={14} y={12} width={104} height={64} rx={2} className={cx('box', t?.pout && 'on')} />
+        <OperandLine o={node.a} x0={22} x1={110} y={32} snap={api.snap} />
+        <text x={66} y={51} className="cmp-sym" textAnchor="middle">
+          {COMPARE_SYMBOL[node.op]}
+        </text>
+        <OperandLine o={node.b} x0={22} x1={110} y={68} snap={api.snap} />
+      </svg>
+    </button>
+  );
+}
+
+const DATA_HEAD = { mov: 'MOV', add: 'ADD', sub: 'SUB', mul: 'MUL', div: 'DIV', scl: 'SCL' } as const;
+const MATH_SYMBOL = { add: '+', sub: '−', mul: '×', div: '÷' } as const;
+
+type DataNode = Extract<OutputNode, { kind: keyof typeof DATA_HEAD }>;
+const isDataNode = (n: OutputNode): n is DataNode => n.kind in DATA_HEAD;
+
+function DataCell({ node, selected, onSelect }: { node: DataNode; selected: boolean; onSelect: (e: React.MouseEvent) => void }) {
+  const api = useApi();
+  const pin = api.snap.trace.get(node.id)?.pin ?? false;
+  const w = node.kind === 'scl' ? SCL_W : BLOCK_W;
+  const right = w - 14;
+  const dstLabel = api.program.labels[node.dst];
+  const value = api.snap.regs[node.dst] ?? 0;
+
+  let expr: ReactNode;
+  if (node.kind === 'mov') {
+    expr = (
+      <>
+        <text x={22} y={42} className="blk-line">
+          {opText(node.src)}
+        </text>
+        {node.src.kind === 'tag' && (
+          <text x={right - 8} y={42} className="blk-val" textAnchor="end">
+            {readNum(api.snap, node.src.tag)}
+          </text>
+        )}
+      </>
+    );
+  } else if (node.kind === 'scl') {
+    expr = (
+      <>
+        <text x={22} y={42} className="blk-line">
+          {opText(node.src)} {node.inMin}–{node.inMax}
+        </text>
+        <text x={22} y={55} className="blk-line">
+          ⇒ {node.outMin}–{node.outMax}
+        </text>
+      </>
+    );
+  } else {
+    expr = (
+      <text x={22} y={42} className="blk-line">
+        {opText(node.a)} {MATH_SYMBOL[node.kind]} {opText(node.b)}
+      </text>
+    );
+  }
+
+  return (
+    <button
+      className={cx('cell', selected && 'selected')}
+      style={{ width: w }}
+      onClick={onSelect}
+      aria-label={`${DATA_HEAD[node.kind]} para ${node.dst}${dstLabel ? `, ${dstLabel}` : ''}`}
+      title={dstLabel ? `${node.dst} — ${dstLabel}` : node.dst}
+    >
+      <svg width={w} height={CELL_H} viewBox={`0 0 ${w} ${CELL_H}`}>
+        <line x1={0} x2={14} y1={WIRE_Y} y2={WIRE_Y} className={cx('ln', pin && 'on')} />
+        <line x1={right} x2={w} y1={WIRE_Y} y2={WIRE_Y} className={cx('ln', pin && 'on')} />
+        <rect x={14} y={8} width={right - 14} height={72} rx={2} className={cx('box', pin && 'on')} />
+        <text x={22} y={24} className="blk-head">
+          {DATA_HEAD[node.kind]}
+        </text>
+        {expr}
+        <text x={22} y={72} className="blk-line">
+          → {node.dst}
+        </text>
+        <text x={right - 8} y={72} className="blk-val strong" textAnchor="end">
+          {value}
+        </text>
+      </svg>
+    </button>
+  );
+}
+
 function OutputCell({ node }: { node: OutputNode }) {
   const api = useApi();
   const pin = api.snap.trace.get(node.id)?.pin ?? false;
-  const label = api.program.labels[node.tag];
   const selected = api.selectedId === node.id;
   const select = (e: React.MouseEvent) => {
     e.stopPropagation();
     api.onSelect(node.id);
   };
+
+  if (isDataNode(node)) return <DataCell node={node} selected={selected} onSelect={select} />;
+
+  const label = api.program.labels[node.tag];
 
   if (node.kind === 'ton' || node.kind === 'tof' || node.kind === 'ctu') {
     const isCounter = node.kind === 'ctu';
@@ -218,27 +385,32 @@ function OutputCell({ node }: { node: OutputNode }) {
     );
   }
 
-  const glyph = node.kind === 'ncoil' ? '/' : node.kind === 'set' ? 'S' : node.kind === 'rst' ? 'R' : '';
+  // Só sobraram as bobinas (coil, ncoil, set, rst): os demais tipos retornaram acima.
+  const coil = node as Coil;
+  const glyph = coil.kind === 'ncoil' ? '/' : coil.kind === 'set' ? 'S' : coil.kind === 'rst' ? 'R' : '';
   const names = { coil: 'Bobina', ncoil: 'Bobina negada', set: 'SET', rst: 'RESET' } as const;
+  // Quem escreve em Q mostra a "casa" da saída física com um traço extra: o olho separa lógica (M) de saída (Q).
+  const physical = tagClass(coil.tag) === 'Q';
   return (
     <button
       className={cx('cell', selected && 'selected')}
       style={{ width: CELL_W }}
       onClick={select}
-      aria-label={`${names[node.kind]} ${node.tag}${label ? `, ${label}` : ''}`}
-      title={label ? `${node.tag} — ${label}` : node.tag}
+      aria-label={`${names[coil.kind]} ${coil.tag}${label ? `, ${label}` : ''}`}
+      title={label ? `${coil.tag} — ${label}` : coil.tag}
     >
       <svg width={CELL_W} height={CELL_H} viewBox={`0 0 ${CELL_W} ${CELL_H}`}>
         <line x1={0} x2={29} y1={WIRE_Y} y2={WIRE_Y} className={cx('ln', pin && 'on')} />
         <line x1={63} x2={CELL_W} y1={WIRE_Y} y2={WIRE_Y} className={cx('ln', pin && 'on')} />
         <circle cx={46} cy={WIRE_Y} r={17} className={cx('coil', pin && 'on')} />
+        {physical && <circle cx={46} cy={WIRE_Y} r={12.5} className={cx('coil-inner', pin && 'on')} />}
         {glyph && (
           <text x={46} y={WIRE_Y + 5} className="coil-glyph" textAnchor="middle">
             {glyph}
           </text>
         )}
         <text x={CELL_W / 2} y={18} className="tag" textAnchor="middle">
-          {node.tag}
+          {coil.tag}
         </text>
         <text x={CELL_W / 2} y={80} className="name" textAnchor="middle">
           {trunc(label, 16)}
@@ -251,7 +423,9 @@ function OutputCell({ node }: { node: OutputNode }) {
 // ---------- Séries e ramos ----------
 
 function NodeView({ node, rungId }: { node: LogicNode; rungId: string }) {
-  return node.kind === 'contact' ? <ContactCell node={node} /> : <ParallelView node={node} rungId={rungId} />;
+  if (node.kind === 'contact') return <ContactCell node={node} />;
+  if (node.kind === 'compare') return <CompareCell node={node} />;
+  return <ParallelView node={node} rungId={rungId} />;
 }
 
 function Series({
@@ -278,7 +452,7 @@ function Series({
         key={`slot-${i}`}
         on={on}
         active={slotsActive}
-        label="Inserir contato aqui"
+        label="Inserir aqui"
         onClick={() => api.onInsertLogic(rungId, containerKey, i)}
       />,
     );

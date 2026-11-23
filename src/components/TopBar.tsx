@@ -1,14 +1,20 @@
 import type { Example } from '../engine/examples';
-import type { Snapshot } from '../hooks/usePlc';
+import type { RunMode, Snapshot } from '../hooks/usePlc';
 import { cx } from '../ui';
 import { Icon, Logo } from './Icons';
 
 export const SCAN_OPTIONS = [5, 10, 20, 50, 100, 250];
 
+const MODE_TEXT: Record<RunMode, string> = { run: 'RUN', pause: 'PAUSA', stop: 'STOP' };
+
 export interface TopBarProps {
-  running: boolean;
+  mode: RunMode;
   onRun: () => void;
+  onPause: () => void;
+  onStep: () => void;
   onStop: () => void;
+  forcedCount: number;
+  onClearForces: () => void;
   scanMs: number;
   onScanMs: (ms: number) => void;
   examples: Example[];
@@ -23,8 +29,26 @@ export interface TopBarProps {
   snap: Snapshot;
 }
 
-export function TopBar(p: TopBarProps) {
+function statsText(p: TopBarProps) {
+  if (p.mode === 'stop') return <span>Parado: saídas desligadas</span>;
   const exec = p.snap.execMs;
+  return (
+    <>
+      <span>
+        Varreduras <b>{p.snap.scans.toLocaleString('pt-BR')}</b>
+      </span>
+      {p.mode === 'run' ? (
+        <span>
+          Execução <b>{exec.toLocaleString('pt-BR', { minimumFractionDigits: 3, maximumFractionDigits: 3 })} ms</b>
+        </span>
+      ) : (
+        <span>Use Passo para rodar um ciclo</span>
+      )}
+    </>
+  );
+}
+
+export function TopBar(p: TopBarProps) {
   return (
     <header className="topbar">
       <div className="brand">
@@ -32,19 +56,37 @@ export function TopBar(p: TopBarProps) {
         <span>CLP Sim</span>
       </div>
 
-      <div className={cx('mode', p.running ? 'run' : 'stop')} role="status" aria-live="polite">
+      <div className={cx('mode', p.mode)} role="status" aria-live="polite">
         <i />
-        <b>{p.running ? 'RUN' : 'STOP'}</b>
+        <b>{MODE_TEXT[p.mode]}</b>
       </div>
 
       <div className="group">
-        <button className="btn run" disabled={p.running} onClick={p.onRun}>
+        <button className="btn run" aria-label="Rodar" disabled={p.mode === 'run'} onClick={p.onRun} title="Rodar o programa em tempo real">
           <Icon name="play" size={15} /> <span className="lbl">Rodar</span>
         </button>
-        <button className="btn stop" disabled={!p.running} onClick={p.onStop}>
+        <button className="btn" aria-label="Pausar" disabled={p.mode !== 'run'} onClick={p.onPause} title="Pausar: congela o programa, mantendo a memória">
+          <Icon name="pause" size={15} /> <span className="lbl">Pausar</span>
+        </button>
+        <button className="btn" aria-label="Passo a passo: uma varredura" disabled={p.mode === 'run'} onClick={p.onStep} title="Executar uma única varredura">
+          <Icon name="step" size={15} /> <span className="lbl">Passo</span>
+        </button>
+        <button className="btn stop" aria-label="Parar" disabled={p.mode === 'stop'} onClick={p.onStop} title="Parar: zera a memória (menos as retentivas)">
           <Icon name="stop" size={15} /> <span className="lbl">Parar</span>
         </button>
       </div>
+
+      {p.forcedCount > 0 && (
+        <button
+          className="chip-force"
+          onClick={p.onClearForces}
+          title="Há endereços forçados (valor imposto, ignorando o programa). Clique para remover todos."
+        >
+          <Icon name="bolt" size={14} />
+          {p.forcedCount} {p.forcedCount === 1 ? 'forçado' : 'forçados'}
+          <Icon name="close" size={13} />
+        </button>
+      )}
 
       <label className="select-inline">
         <span>Ciclo</span>
@@ -58,23 +100,12 @@ export function TopBar(p: TopBarProps) {
       </label>
 
       <div className="stats" aria-label="Estatísticas da varredura">
-        {p.running ? (
-          <>
-            <span>
-              Varreduras <b>{p.snap.scans.toLocaleString('pt-BR')}</b>
-            </span>
-            <span>
-              Execução <b>{exec.toLocaleString('pt-BR', { minimumFractionDigits: 3, maximumFractionDigits: 3 })} ms</b>
-            </span>
-          </>
-        ) : (
-          <span>Parado: saídas desligadas</span>
-        )}
+        {statsText(p)}
       </div>
 
       <div className="spacer" />
 
-      <label className="select-inline">
+      <label className="select-inline examples">
         <span>Exemplos</span>
         <select
           value=""
